@@ -72,7 +72,7 @@ Expected response (tx hash is real on BSC testnet):
   "message": "Disbursement submitted to BSC testnet",
   "tx_hash": "0x...",
   "verification": {
-    "wallet_address": "0x1234",
+    "wallet_address": "0x1234...",
     "verified": true,
     "confidence": 1.0,
     "reason": "Stubbed verification service"

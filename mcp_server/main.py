@@ -56,6 +56,7 @@ app = FastAPI(title="tBNB MCP Server", version="0.2.0")
 class DisbursementRequest(BaseModel):
     builder_id: str = Field(..., description="Verified identity in Discord/Telegram")
     wallet_address: str = Field(..., description="Checksum wallet address")
+    github_username: str = Field(..., description="GitHub username for verification")
     channel: str = Field(..., description="Support channel (discord, telegram, web)")
 
 
@@ -73,17 +74,28 @@ async def health() -> dict[str, str]:
 
 
 async def verify_wallet(payload: DisbursementRequest) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=5) as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             VERIFICATION_URL,
             json={
                 "wallet_address": payload.wallet_address,
+                "github_username": payload.github_username,
                 "requester_id": payload.builder_id,
                 "channel": payload.channel,
             },
         )
         resp.raise_for_status()
         return resp.json()
+
+
+async def record_payout(github_user_id: int) -> None:
+    """Record successful payout in verification service."""
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(
+            f"{VERIFICATION_URL.rstrip('/verify')}/record-payout",
+            json={"github_user_id": github_user_id},
+        )
+        resp.raise_for_status()
 
 
 def _send_tbnb(wallet_address: str, amount: Decimal) -> str:
@@ -126,14 +138,24 @@ async def request_tbnb(payload: DisbursementRequest) -> DisbursementResponse:
     verification = await verify_wallet(payload)
 
     if not verification.get("verified"):
+        reason = verification.get("reason", "Unknown verification failure")
         raise HTTPException(
             status_code=403,
-            detail="Wallet verification failed; escalate to manual review.",
+            detail=f"Verification failed: {reason}",
         )
 
     request_id = str(uuid.uuid4())
     try:
         tx_hash = await initiate_payout(payload.wallet_address)
+        
+        # Record successful payout for rate limiting
+        github_user_id = verification.get("github_user_id")
+        if github_user_id:
+            try:
+                await record_payout(github_user_id)
+            except Exception as exc:
+                # Log but don't fail the request - payout already succeeded
+                print(f"Warning: Failed to record payout: {exc}")
     except Exception as exc:  # pragma: no cover - surfaced to clients
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

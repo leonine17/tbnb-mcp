@@ -4,8 +4,24 @@ This repository hosts the experimental architecture and prototype services for a
 
 ## Services
 
-### Verification Source Stub (`verification_service/`)
-FastAPI service that always returns `verified=true` so MCP development can continue while the real verification pipeline is designed.
+### Verification Service (`verification_service/`)
+FastAPI service that verifies builders via GitHub API with rate limiting.
+
+#### Configure (Optional)
+Create `verification_service/.env` to increase GitHub API rate limits:
+```env
+GITHUB_TOKEN=ghp_your_personal_access_token_here
+```
+
+**Getting a GitHub Token:**
+1. Go to https://github.com/settings/tokens
+2. Click "Generate new token (classic)"
+3. Set expiration and check `read:user` scope
+4. Copy the token and add it to `.env`
+
+**Rate Limits:**
+- Without token: 60 requests/hour per IP
+- With token: 5,000 requests/hour
 
 #### Run locally (PowerShell)
 ```bash
@@ -13,14 +29,14 @@ cd verification_service
 python -m venv .venv
 .venv\Scripts\activate               # Windows PowerShell: .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-uvicorn main:app --reload --host 0.0.0.0 --port 8080
+uvicorn main:app --host 0.0.0.0 --port 8080
 ```
 
-Test the stub:
+Test the service:
 ```bash
 curl -X POST http://localhost:8080/verify ^
   -H "Content-Type: application/json" ^
-  -d "{\"wallet_address\": \"0x1234\"}"
+  -d "{\"wallet_address\": \"0x1234\", \"github_username\": \"octocat\"}"
 ```
 
 Expected response:
@@ -28,8 +44,11 @@ Expected response:
 {
   "wallet_address": "0x1234",
   "verified": true,
-  "confidence": 1.0,
-  "reason": "Stubbed verification service"
+  "confidence": 0.75,
+  "reason": "All verification checks passed",
+  "github_user_id": 1,
+  "repo_count": 8,
+  "account_age_days": 5000
 }
 ```
 
@@ -104,3 +123,55 @@ Keep the verification service and MCP server running. Sample session:
 builder> hey support, can I get tBNB sent to 0x76c9...15ce?
 assistant> Payout approved ... tx_hash=0x...
 ```
+
+## End-to-End Flow (Sequence)
+```mermaid
+sequenceDiagram
+    participant Builder
+    participant Bot as LangChain Bot
+    participant OpenAI as OpenAI Chat API
+    participant MCP as MCP Server
+    participant Verify as Verification Service
+    participant Chain as BSC Testnet
+
+    Builder->>Bot: "Hi" / "Send tBNB to 0x..."
+    Bot->>OpenAI: Chat completion w/ tool schemas
+    OpenAI-->>Bot: Function-call to `issue_tbnb` (builder_id, wallet, channel)
+    Bot->>MCP: POST /requests (builder_id, wallet, channel)
+    MCP->>Verify: POST /verify (wallet, requester)
+    Verify-->>MCP: { verified: true }
+    MCP->>Chain: Send tBNB transaction
+    Chain-->>MCP: Tx hash / receipt
+    MCP-->>Bot: Approval + tx_hash (+ verification)
+    Bot-->>OpenAI: Tool result / assistant message
+    OpenAI-->>Bot: Final LLM reply text
+    Bot-->>Builder: Confirmation + tx_hash
+```
+
+## Verification (Via GitHub)
+
+The verification service performs the following checks:
+
+1. **GitHub Account Exists**: Verifies the GitHub username exists
+2. **Repository Count**: Builder must have at least 1 public repository
+3. **Account Age**: GitHub account must be at least 30 days old
+4. **Rate Limiting**: Each GitHub user can only collect tBNB once per 24 hours
+
+### Database Schema
+
+The verification service uses SQLite to track rate limiting:
+- `github_user_id` (INTEGER PRIMARY KEY): GitHub's numeric user ID
+- `last_payout_timestamp` (TIMESTAMP): When the user last received tBNB
+
+### API Changes
+
+All requests now require `github_username`:
+- **Verification Service**: `POST /verify` expects `github_username` in request body
+- **MCP Server**: `POST /requests` expects `github_username` in request body
+- **LangChain Bot**: `issue_tbnb` tool now requires `github_username` parameter
+
+### Rate Limiting
+
+Rate limiting is enforced per GitHub user ID (not username), preventing users from bypassing limits by changing usernames. The 24-hour cooldown is checked during verification and recorded after successful payout. 
+
+to prevent users from using multiple repos, the verification service will check in the url, the username, the repos, file name, wallet address and commit hash. data stored in SQL is username, commit hash, wallet address and time stamp.

@@ -130,22 +130,56 @@ sequenceDiagram
     participant Builder
     participant Bot as LangChain Bot
     participant OpenAI as OpenAI Chat API
+    participant GitHub as GitHub API
     participant MCP as MCP Server
     participant Verify as Verification Service
     participant Chain as BSC Testnet
 
-    Builder->>Bot: "Hi" / "Send tBNB to 0x..."
+    Builder->>Bot: "I want tBNB, my GitHub is @username"
     Bot->>OpenAI: Chat completion w/ tool schemas
-    OpenAI-->>Bot: Function-call to `issue_tbnb` (builder_id, wallet, channel)
-    Bot->>MCP: POST /requests (builder_id, wallet, channel)
-    MCP->>Verify: POST /verify (wallet, requester)
-    Verify-->>MCP: { verified: true }
-    MCP->>Chain: Send tBNB transaction
-    Chain-->>MCP: Tx hash / receipt
-    MCP-->>Bot: Approval + tx_hash (+ verification)
-    Bot-->>OpenAI: Tool result / assistant message
-    OpenAI-->>Bot: Final LLM reply text
-    Bot-->>Builder: Confirmation + tx_hash
+    OpenAI-->>Bot: Function-call to `issue_tbnb` (github_username, repo_url?)
+    Bot->>GitHub: GET /repos/{username}/{repo}/contents/bsc.address
+    alt Wallet found in GitHub repo
+        GitHub-->>Bot: bsc.address file content (wallet address)
+        Bot->>MCP: POST /requests (github_username, wallet_address, builder_id, channel)
+        MCP->>Verify: POST /verify (github_username, wallet_address)
+        Verify->>GitHub: GET /users/{username} (verify account exists)
+        alt GitHub user exists
+            GitHub-->>Verify: User data (id, repos, created_at)
+            Verify->>Verify: Check: account age >= 30 days
+            Verify->>Verify: Check: repo count >= 1
+            Verify->>Verify: Check: rate limit (24h cooldown per user_id)
+            alt Verification passes
+                Verify-->>MCP: { verified: true, github_user_id, confidence }
+                MCP->>Chain: Send tBNB transaction (signed)
+                Chain-->>MCP: Tx hash / receipt
+                MCP->>Verify: POST /record-payout (github_user_id)
+                Verify-->>MCP: Payout recorded
+                MCP-->>Bot: Approval + tx_hash + verification details
+                Bot-->>OpenAI: Tool result / assistant message
+                OpenAI-->>Bot: Final LLM reply text
+                Bot-->>Builder: Confirmation + tx_hash + verification status
+            else Verification fails
+                Verify-->>MCP: { verified: false, reason: "Account too new" / "No repos" / "Rate limited" }
+                MCP-->>Bot: HTTP 403 - Verification failed + reason
+                Bot-->>OpenAI: Tool result (error message)
+                OpenAI-->>Bot: Final LLM reply text
+                Bot-->>Builder: Error message explaining why verification failed
+            end
+        else GitHub user not found
+            GitHub-->>Verify: 404 Not Found
+            Verify-->>MCP: { verified: false, reason: "GitHub account not found" }
+            MCP-->>Bot: HTTP 403 - Verification failed
+            Bot-->>OpenAI: Tool result (error message)
+            OpenAI-->>Bot: Final LLM reply text
+            Bot-->>Builder: Error: GitHub account not found
+        end
+    else Wallet not found in GitHub repo
+        GitHub-->>Bot: 404 Not Found (bsc.address file missing)
+        Bot-->>OpenAI: Tool result (error: wallet not found)
+        OpenAI-->>Bot: Final LLM reply text
+        Bot-->>Builder: Error: bsc.address file not found in repository
+    end
 ```
 
 ## Verification (Via GitHub)
